@@ -1,0 +1,272 @@
+// Beverage Co. — data model
+// Money is always stored as an integer in paise (1 rupee = 100 paise) to avoid
+// floating point rounding bugs in financial calculations (see lib/pricing.ts).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CUSTOMER
+  STAFF
+  ADMIN
+}
+
+enum OrderStatus {
+  CREATED
+  PAYMENT_PENDING
+  PAID
+  CONFIRMED
+  PREPARING
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+model User {
+  id                String    @id @default(cuid())
+  email             String    @unique
+  emailVerifiedAt   DateTime?
+  passwordHash      String? // null for OAuth-only accounts
+  name              String
+  phone             String?
+  role              Role      @default(CUSTOMER)
+  failedLoginCount  Int       @default(0)
+  lockedUntil       DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  sessions          Session[]
+  accounts          OAuthAccount[]
+  addresses         Address[]
+  cart              CartItem[]
+  orders            Order[]
+  wishlist          WishlistItem[]
+  passwordResets    PasswordResetToken[]
+  auditLogs         AuditLog[]
+
+  @@index([email])
+}
+
+// NextAuth database-session model. Sessions are server-side and revocable —
+// never trust a client-supplied identity claim without loading this row.
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expires      DateTime
+  createdAt    DateTime @default(now())
+  ipAddress    String?
+  userAgent    String?
+
+  @@index([userId])
+}
+
+model OAuthAccount {
+  id                String  @id @default(cuid())
+  userId            String
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider          String
+  providerAccountId String
+  accessToken       String?
+  refreshToken      String?
+  expiresAt         Int?
+
+  @@unique([provider, providerAccountId])
+}
+
+model PasswordResetToken {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String   @unique // SHA-256 of the random token; raw token is never stored
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Address {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label     String
+  name      String
+  phone     String
+  line1     String   // house / flat
+  line2     String   // street
+  area      String
+  city      String
+  state     String
+  pincode   String
+  landmark  String?
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orders    Order[]
+
+  @@index([userId])
+}
+
+model Category {
+  id       String    @id @default(cuid())
+  slug     String    @unique
+  name     String
+  products Product[]
+}
+
+model Product {
+  id            String   @id @default(cuid())
+  slug          String   @unique
+  name          String
+  description   String
+  categoryId    String
+  category      Category @relation(fields: [categoryId], references: [id])
+  priceInPaise  Int // single source of truth for price — never trust client-sent prices
+  isAvailable   Boolean  @default(true)
+  ingredients   String[]
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  cartItems     CartItem[]
+  orderItems    OrderItem[]
+  relatedFrom   ProductRelation[] @relation("relatedFrom")
+  relatedTo     ProductRelation[] @relation("relatedTo")
+
+  @@index([categoryId])
+}
+
+// Product-to-product recommendation graph referenced by lib/recommendations.ts.
+// This table is informational only — see SECURITY.md #13, the recommendation
+// engine never influences price, discount or delivery-fee calculations.
+model ProductRelation {
+  id        String  @id @default(cuid())
+  fromId    String
+  from      Product @relation("relatedFrom", fields: [fromId], references: [id], onDelete: Cascade)
+  toId      String
+  to        Product @relation("relatedTo", fields: [toId], references: [id], onDelete: Cascade)
+  weight    Int     @default(0) // higher = stronger pairing, used as a tiebreaker
+
+  @@unique([fromId, toId])
+}
+
+model CartItem {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product  @relation(fields: [productId], references: [id])
+  quantity  Int
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, productId])
+  @@index([userId])
+}
+
+model WishlistItem {
+  id        String  @id @default(cuid())
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId String
+
+  @@unique([userId, productId])
+}
+
+model Coupon {
+  id                String   @id @default(cuid())
+  code              String   @unique
+  percentOff        Int? // 0-100
+  flatOffInPaise    Int?
+  minSubtotalInPaise Int     @default(0)
+  maxRedemptions    Int?
+  maxRedemptionsPerUser Int  @default(1)
+  expiresAt         DateTime?
+  isActive          Boolean  @default(true)
+
+  redemptions       CouponRedemption[]
+}
+
+model CouponRedemption {
+  id       String   @id @default(cuid())
+  couponId String
+  coupon   Coupon   @relation(fields: [couponId], references: [id])
+  userId   String
+  orderId  String   @unique
+  createdAt DateTime @default(now())
+
+  @@index([couponId, userId])
+}
+
+model Order {
+  id                  String        @id @default(cuid())
+  userId              String
+  user                User          @relation(fields: [userId], references: [id])
+  addressId           String
+  address             Address       @relation(fields: [addressId], references: [id])
+  status              OrderStatus   @default(CREATED)
+  paymentStatus       PaymentStatus @default(PENDING)
+  subtotalInPaise     Int
+  discountInPaise      Int          @default(0)
+  deliveryFeeInPaise   Int
+  totalInPaise         Int
+  idempotencyKey       String       @unique
+  paymentProviderRef   String?
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+
+  items                OrderItem[]
+
+  @@index([userId])
+}
+
+model OrderItem {
+  id             String  @id @default(cuid())
+  orderId        String
+  order          Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId      String
+  product        Product @relation(fields: [productId], references: [id])
+  quantity       Int
+  unitPriceInPaise Int   // snapshot of price at purchase time — product price may change later
+
+  @@index([orderId])
+}
+
+// Records processed payment-webhook event IDs so a retried/duplicated webhook
+// delivery can never be applied twice (see lib/webhooks.ts).
+model WebhookEvent {
+  id          String   @id // provider's event id, used as the idempotency key
+  provider    String
+  receivedAt  DateTime @default(now())
+  payloadHash String
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  eventType String // e.g. LOGIN_FAILED, ORDER_CREATED, ADDRESS_CHANGED
+  resource  String? // e.g. "order:abc123"
+  result    String // SUCCESS | DENIED | ERROR
+  ipAddress String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([eventType])
+}
